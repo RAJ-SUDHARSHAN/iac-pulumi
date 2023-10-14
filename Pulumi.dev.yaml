@@ -1,0 +1,3 @@
+config:
+  aws:profile: dev
+  aws:region: us-west-1

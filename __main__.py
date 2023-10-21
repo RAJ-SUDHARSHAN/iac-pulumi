@@ -5,12 +5,14 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+
 # Fetching environment variables with error handling
 def get_env_variable(var_name):
     value = os.getenv(var_name)
     if not value:
         raise ValueError(f"Environment variable {var_name} not set!")
     return value
+
 
 CIDR_BLOCK = get_env_variable("CIDR_BLOCK")
 TAG_BASE_NAME = get_env_variable("TAG_BASE_NAME")
@@ -66,6 +68,7 @@ for i in range(num_azs):
         vpc_id=my_vpc.id,
         cidr_block=get_env_variable(f"PUBLIC_SUBNET_CIDR_BLOCK{i}"),
         availability_zone=availability_zones.names[i],
+        map_public_ip_on_launch=True,
         tags={
             "Name": f"{TAG_BASE_NAME}-public_subnet-{i}",
         },
@@ -82,6 +85,7 @@ for i in range(num_azs):
         vpc_id=my_vpc.id,
         cidr_block=get_env_variable(f"PRIVATE_SUBNET_CIDR_BLOCK{i}"),
         availability_zone=availability_zones.names[i],
+        map_public_ip_on_launch=False,
         tags={
             "Name": f"{TAG_BASE_NAME}-private_subnet-{i}",
         },
@@ -92,3 +96,51 @@ for i in range(num_azs):
         subnet_id=private_subnet.id,
         route_table_id=private_rt.id,
     )
+    
+INGRESS_PORTS = list(map(int, get_env_variable("INGRESS_PORTS").split(',')))
+SG_CIDR_BLOCK= get_env_variable("SG_CIDR_BLOCK")
+EGRESS_PORT = int(get_env_variable("EGRESS_PORT"))
+
+app_security_group = aws.ec2.SecurityGroup(
+    "application_security_group",
+    vpc_id=my_vpc.id,
+    description="Security group for application",
+    ingress=[
+        {
+            "protocol": "tcp",
+            "from_port": port,
+            "to_port": port,
+            "cidr_blocks": [SG_CIDR_BLOCK],
+        }
+        for port in INGRESS_PORTS
+    ],
+    egress=[
+        {
+            "protocol": "-1",
+            "from_port": EGRESS_PORT,
+            "to_port": EGRESS_PORT,
+            "cidr_blocks": [SG_CIDR_BLOCK]
+        }
+    ],
+    tags={
+        "Name": f"{TAG_BASE_NAME}-webapp_security_group",
+    },
+)
+
+app_instance = aws.ec2.Instance(
+    "app_instance",
+    ami=get_env_variable("AMI_ID"),
+    instance_type=get_env_variable("INSTANCE_TYPE"),
+    key_name=get_env_variable("KEY_NAME"),
+    vpc_security_group_ids=[app_security_group.id],
+    subnet_id=public_subnet.id,
+    root_block_device={
+        "volume_size": int(get_env_variable("ROOT_VOLUME_SIZE")),
+        "volume_type": get_env_variable("ROOT_VOLUME_TYPE"),
+        "delete_on_termination": get_env_variable("DELETE_ON_TERMINATION"),  
+    },
+    tags={
+        "Name": f"{TAG_BASE_NAME}-app_instance",
+    },
+    disable_api_termination=get_env_variable("DISABLE_API_TERMINATION"),
+)

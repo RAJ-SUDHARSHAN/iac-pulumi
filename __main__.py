@@ -1,4 +1,6 @@
+import json
 import os
+
 import pulumi
 import pulumi_aws as aws
 from dotenv import load_dotenv
@@ -180,7 +182,7 @@ RDS_DB_NAME = get_env_variable("RDS_DB_NAME")
 RDS_ENGINE = get_env_variable("RDS_ENGINE")
 RDS_ENGINE_VERSION = get_env_variable("RDS_ENGINE_VERSION")
 RDS_INSTANCE_CLASS = get_env_variable("RDS_INSTANCE_CLASS")
-RDS_STORGAE = get_env_variable("RDS_STORGAE")
+RDS_STORAGAE = get_env_variable("RDS_STORAGAE")
 RDS_IDENTIFIER = get_env_variable("RDS_IDENTIFIER")
 RDS_USERNAME = get_env_variable("RDS_USERNAME")
 RDS_DB_PASSWORD = get_env_variable("RDS_DB_PASSWORD")
@@ -193,7 +195,7 @@ USERDATA_GROUP = get_env_variable("USERDATA_GROUP")
 rds_instance = aws.rds.Instance(
     "csye6225-rds-instance",
     db_name=RDS_DB_NAME,
-    allocated_storage=RDS_STORGAE,
+    allocated_storage=RDS_STORAGAE,
     engine=RDS_ENGINE,
     engine_version=RDS_ENGINE_VERSION,
     instance_class=RDS_INSTANCE_CLASS,
@@ -212,6 +214,44 @@ rds_instance = aws.rds.Instance(
 )
 
 
+cloudwatch_role = aws.iam.Role(
+    "cloudwatch_role",
+    assume_role_policy=json.dumps(
+        {
+            "Version": "2012-10-17",
+            "Statement": [
+                {
+                    "Action": "sts:AssumeRole",
+                    "Effect": "Allow",
+                    "Sid": "",
+                    "Principal": {
+                        "Service": "ec2.amazonaws.com",
+                    },
+                }
+            ],
+        }
+    ),
+    tags={
+        "Name": f"{TAG_BASE_NAME}-cloudwatch_role",
+    },
+)
+
+
+cloudwatch_policy_attachment = aws.iam.RolePolicyAttachment(
+    "cloudwatch_role_policy_attachment",
+    role=cloudwatch_role.name,
+    policy_arn="arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy",
+)
+
+cloudwatch_instance_profile = aws.iam.InstanceProfile(
+    "cloudwatch_instance_profile",
+    role=cloudwatch_role.name,
+    tags={
+        "Name": f"{TAG_BASE_NAME}-instance_profile",
+    },
+)
+
+
 def generate_user_data_script(rds_endpoint):
     return f"""#!/bin/bash
 ENV_FILE="/opt/webapp.properties"
@@ -225,8 +265,16 @@ echo "CSV_PATH={get_env_variable('CSV_PATH')}" >> $ENV_FILE
 chown {USERDATA_USER}:{USERDATA_GROUP} $ENV_FILE
 sudo chown -R {USERDATA_USER}:{USERDATA_GROUP} /opt/webapp/
 sudo chown {USERDATA_USER}:{USERDATA_GROUP} /opt/users.csv
+sudo chown csye6225:csye6225 /var/log/webapp/csye6225.log
 chmod 400 $ENV_FILE
 sudo systemctl daemon-reload
+sudo /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl \
+    -a fetch-config \
+    -m ec2 \
+    -c file:/opt/cloudwatch-config.json \
+    -s
+sudo systemctl enable amazon-cloudwatch-agent
+sudo systemctl start amazon-cloudwatch-agent
 sudo systemctl start csye6225
 """
 
@@ -249,6 +297,20 @@ app_instance = aws.ec2.Instance(
         "Name": f"{TAG_BASE_NAME}-app_instance",
     },
     disable_api_termination=get_env_variable("DISABLE_API_TERMINATION"),
+    iam_instance_profile=cloudwatch_instance_profile.name,
     opts=pulumi.ResourceOptions(depends_on=[rds_instance]),
     user_data=user_data_script,
+)
+
+HOSTED_ZONE_NAME = get_env_variable("HOSTED_ZONE_NAME")
+HOSTED_ZONE_ID = get_env_variable("HOSTED_ZONE_ID")
+
+a_record = aws.route53.Record(
+    "a_record",
+    zone_id=HOSTED_ZONE_ID,
+    name=HOSTED_ZONE_NAME,
+    type="A",
+    ttl=60,
+    opts=pulumi.ResourceOptions(depends_on=[app_instance]),
+    records=[app_instance.public_ip],
 )

@@ -351,7 +351,7 @@ asg_launch_template = aws.ec2.LaunchTemplate(
         aws.ec2.LaunchTemplateBlockDeviceMappingArgs(
             device_name="/dev/xvda",
             ebs=aws.ec2.LaunchTemplateBlockDeviceMappingEbsArgs(
-                volume_size=int(get_env_variable("ROOT_VOLUME_SIZE")),
+                volume_size=25,
                 volume_type=get_env_variable("ROOT_VOLUME_TYPE"),
                 delete_on_termination=get_env_variable("DELETE_ON_TERMINATION"),
             ),

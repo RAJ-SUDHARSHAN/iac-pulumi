@@ -1,3 +1,4 @@
+import base64
 import json
 import os
 
@@ -109,11 +110,14 @@ APP_INGRESS_PORTS = list(map(int, get_env_variable("APP_INGRESS_PORTS").split(",
 APP_EGRESS_PORT = int(get_env_variable("APP_EGRESS_PORT"))
 DB_INGRESS_PORT = int(get_env_variable("DB_INGRESS_PORT"))
 DB_EGRESS_PORT = int(get_env_variable("DB_EGRESS_PORT"))
+LB_INGRESS_PORTS = list(map(int, get_env_variable("LB_INGRESS_PORTS").split(",")))
+LB_EGRESS_PORT = int(get_env_variable("LB_EGRESS_PORT"))
 
-app_security_group = aws.ec2.SecurityGroup(
-    "application_security_group",
+
+lb_security_group = aws.ec2.SecurityGroup(
+    "load_balancer_security_group",
     vpc_id=my_vpc.id,
-    description="Security group for application",
+    description="Security group for Load balancer",
     ingress=[
         {
             "protocol": "tcp",
@@ -121,20 +125,54 @@ app_security_group = aws.ec2.SecurityGroup(
             "to_port": port,
             "cidr_blocks": [SG_CIDR_BLOCK],
         }
-        for port in APP_INGRESS_PORTS
+        for port in LB_INGRESS_PORTS
     ],
     egress=[
         {
             "protocol": "-1",
-            "from_port": APP_EGRESS_PORT,
-            "to_port": APP_EGRESS_PORT,
+            "from_port": LB_EGRESS_PORT,
+            "to_port": LB_EGRESS_PORT,
             "cidr_blocks": [SG_CIDR_BLOCK],
+        }
+    ],
+    tags={
+        "Name": f"{TAG_BASE_NAME}-lb_security_group",
+    },
+)
+
+app_security_group = aws.ec2.SecurityGroup(
+    "application_security_group",
+    vpc_id=my_vpc.id,
+    description="Security group for application",
+    ingress=[
+        # Allow SSH
+        {
+            "protocol": "tcp",
+            "from_port": 22,
+            "to_port": 22,
+            "cidr_blocks": [SG_CIDR_BLOCK],
+        },
+        # Allow application traffic from load balancer
+        {
+            "protocol": "tcp",
+            "from_port": 5000,  # or other application ports
+            "to_port": 5000,  # or other application ports
+            "security_groups": [lb_security_group.id],
+        },
+    ],
+    egress=[
+        {
+            "protocol": "-1",
+            "from_port": 0,
+            "to_port": 0,
+            "cidr_blocks": ["0.0.0.0/0"],
         }
     ],
     tags={
         "Name": f"{TAG_BASE_NAME}-webapp_security_group",
     },
 )
+
 
 db_security_group = aws.ec2.SecurityGroup(
     "db_security_group",
@@ -160,6 +198,7 @@ db_security_group = aws.ec2.SecurityGroup(
         "Name": f"{TAG_BASE_NAME}-db_security_group",
     },
 )
+
 
 db_param_grp = aws.rds.ParameterGroup(
     "rds-parameter-group",
@@ -280,27 +319,182 @@ sudo systemctl start csye6225
 
 
 user_data_script = rds_instance.endpoint.apply(generate_user_data_script)
+user_data_encoded = user_data_script.apply(
+    lambda ud: base64.b64encode(ud.encode()).decode()
+)
 
-app_instance = aws.ec2.Instance(
-    "app_instance",
-    ami=get_env_variable("AMI_ID"),
+
+# app_instance = aws.ec2.Instance(
+#     "app_instance",
+#     ami=get_env_variable("AMI_ID"),
+#     instance_type=get_env_variable("INSTANCE_TYPE"),
+#     key_name=get_env_variable("KEY_NAME"),
+#     vpc_security_group_ids=[app_security_group.id],
+#     subnet_id=public_subnets[0].id,
+#     root_block_device={
+#         "volume_size": int(get_env_variable("ROOT_VOLUME_SIZE")),
+#         "volume_type": get_env_variable("ROOT_VOLUME_TYPE"),
+#         "delete_on_termination": get_env_variable("DELETE_ON_TERMINATION"),
+#     },
+#     tags={
+#         "Name": f"{TAG_BASE_NAME}-app_instance",
+#     },
+#     disable_api_termination=get_env_variable("DISABLE_API_TERMINATION"),
+#     iam_instance_profile=cloudwatch_instance_profile.name,
+#     opts=pulumi.ResourceOptions(depends_on=[rds_instance]),
+#     user_data=user_data_script,
+# )
+
+
+asg_launch_template = aws.ec2.LaunchTemplate(
+    "asg_launch_template",
+    block_device_mappings=[
+        aws.ec2.LaunchTemplateBlockDeviceMappingArgs(
+            device_name="/dev/xvda",
+            ebs=aws.ec2.LaunchTemplateBlockDeviceMappingEbsArgs(
+                volume_size=20,
+                volume_type=get_env_variable("ROOT_VOLUME_TYPE"),
+                delete_on_termination=get_env_variable("DELETE_ON_TERMINATION"),
+            ),
+        )
+    ],
+    network_interfaces=[
+        aws.ec2.LaunchTemplateNetworkInterfaceArgs(
+            associate_public_ip_address=True,
+            security_groups=[app_security_group.id],
+            # subnet_id=public_subnets[0].id,
+        )
+    ],
+    disable_api_termination=get_env_variable("DISABLE_API_TERMINATION"),
+    iam_instance_profile=aws.ec2.LaunchTemplateIamInstanceProfileArgs(
+        arn=cloudwatch_instance_profile.arn,
+    ),
+    image_id=get_env_variable("AMI_ID"),
+    instance_initiated_shutdown_behavior="terminate",
     instance_type=get_env_variable("INSTANCE_TYPE"),
     key_name=get_env_variable("KEY_NAME"),
-    vpc_security_group_ids=[app_security_group.id],
-    subnet_id=public_subnets[0].id,
-    root_block_device={
-        "volume_size": int(get_env_variable("ROOT_VOLUME_SIZE")),
-        "volume_type": get_env_variable("ROOT_VOLUME_TYPE"),
-        "delete_on_termination": get_env_variable("DELETE_ON_TERMINATION"),
-    },
-    tags={
-        "Name": f"{TAG_BASE_NAME}-app_instance",
-    },
-    disable_api_termination=get_env_variable("DISABLE_API_TERMINATION"),
-    iam_instance_profile=cloudwatch_instance_profile.name,
+    # vpc_security_group_ids=[app_security_group.id],
+    tag_specifications=[
+        aws.ec2.LaunchTemplateTagSpecificationArgs(
+            resource_type="instance",
+            tags={
+                "Name": f"{TAG_BASE_NAME}-app_instance",
+            },
+        )
+    ],
     opts=pulumi.ResourceOptions(depends_on=[rds_instance]),
-    user_data=user_data_script,
+    user_data=user_data_encoded,
 )
+
+
+alb = aws.lb.LoadBalancer(
+    "csye6225-alb",
+    internal=False,
+    load_balancer_type="application",
+    security_groups=[ _security_group.id],
+    subnets=[subnet.id for subnet in public_subnets],
+    enable_deletion_protection=False,
+    tags={
+        "Name": f"{TAG_BASE_NAME}-load_balancer",
+    },
+)
+
+target_group = aws.lb.TargetGroup(
+    "csye6225-target-group",
+    # target_type="alb",
+    port=5000,
+    protocol="HTTP",
+    vpc_id=my_vpc.id,
+    health_check={
+        "enabled": True,
+        "healthy_threshold": 2,
+        "interval": 30,
+        "path": "/healthz", 
+        "protocol": "HTTP",
+    },
+)
+
+front_end_listener = aws.lb.Listener(
+    "csye6225_frontEndListener",
+    load_balancer_arn=alb.arn,
+    port=80,
+    default_actions=[
+        aws.lb.ListenerDefaultActionArgs(
+            type="forward",
+            target_group_arn=target_group.arn,
+        )
+    ],
+)
+
+asg = aws.autoscaling.Group(
+    "csye6225_asg",
+    # availability_zones=availability_zones.names,
+    default_cooldown=60,
+    desired_capacity=1,
+    max_size=3,
+    min_size=1,
+    launch_template=aws.autoscaling.GroupLaunchTemplateArgs(
+        id=asg_launch_template.id,
+        version="$Latest",
+    ),
+    vpc_zone_identifiers=[subnet.id for subnet in public_subnets],
+    health_check_grace_period=300,
+    health_check_type="EC2",
+    target_group_arns=[target_group.arn],
+    opts=pulumi.ResourceOptions(depends_on=[rds_instance, asg_launch_template]),
+    tags=[
+        aws.autoscaling.GroupTagArgs(
+            key="Key",
+            value=f"{TAG_BASE_NAME}-app_instance",
+            propagate_at_launch=True,
+        )
+    ],
+)
+
+scale_out_policy = aws.autoscaling.Policy(
+    "csye6225_asg_scale_out_policy",
+    scaling_adjustment=1,
+    adjustment_type="ChangeInCapacity",
+    autoscaling_group_name=asg.name,
+)
+
+scale_in_policy = aws.autoscaling.Policy(
+    "csye6225_asg_scale_in_policy",
+    scaling_adjustment=-1,
+    adjustment_type="ChangeInCapacity",
+    autoscaling_group_name=asg.name,
+)
+
+# CloudWatch Alarms for Auto Scaling
+scale_out_alarm = aws.cloudwatch.MetricAlarm(
+    "csye6225_scale_out_alarm",
+    comparison_operator="GreaterThanOrEqualToThreshold",
+    evaluation_periods=2,
+    metric_name="CPUUtilization",
+    namespace="AWS/EC2",
+    period=60,
+    statistic="Average",
+    threshold=5,
+    alarm_description="Scale up if CPU > 5%",
+    dimensions={"AutoScalingGroupName": asg.name},
+    alarm_actions=[scale_out_policy.arn],
+)
+
+scale_in_alarm = aws.cloudwatch.MetricAlarm(
+    "csye6225_scale_in_alarm",
+    comparison_operator="LessThanOrEqualToThreshold",
+    evaluation_periods=2,
+    metric_name="CPUUtilization",
+    namespace="AWS/EC2",
+    period=60,
+    statistic="Average",
+    threshold=3,
+    alarm_description="Scale down if CPU < 3%",
+    dimensions={"AutoScalingGroupName": asg.name},
+    alarm_actions=[scale_in_policy.arn],
+)
+
+
 
 HOSTED_ZONE_NAME = get_env_variable("HOSTED_ZONE_NAME")
 HOSTED_ZONE_ID = get_env_variable("HOSTED_ZONE_ID")
@@ -310,7 +504,15 @@ a_record = aws.route53.Record(
     zone_id=HOSTED_ZONE_ID,
     name=HOSTED_ZONE_NAME,
     type="A",
-    ttl=60,
-    opts=pulumi.ResourceOptions(depends_on=[app_instance]),
-    records=[app_instance.public_ip],
+    # ttl=60,
+    opts=pulumi.ResourceOptions(depends_on=[alb]),
+    # records=[alb.id],
+    allow_overwrite=True,
+    aliases=[
+        aws.route53.RecordAliasArgs(
+            name=alb.dns_name,
+            zone_id=alb.zone_id,
+            evaluate_target_health=True,
+        )
+    ],
 )

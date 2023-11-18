@@ -155,8 +155,8 @@ app_security_group = aws.ec2.SecurityGroup(
         # Allow application traffic from load balancer
         {
             "protocol": "tcp",
-            "from_port": 5000,  # or other application ports
-            "to_port": 5000,  # or other application ports
+            "from_port": 5000, 
+            "to_port": 5000,
             "security_groups": [lb_security_group.id],
         },
     ],
@@ -262,7 +262,6 @@ cloudwatch_role = aws.iam.Role(
                 {
                     "Action": "sts:AssumeRole",
                     "Effect": "Allow",
-                    "Sid": "",
                     "Principal": {
                         "Service": "ec2.amazonaws.com",
                     },
@@ -352,7 +351,7 @@ asg_launch_template = aws.ec2.LaunchTemplate(
         aws.ec2.LaunchTemplateBlockDeviceMappingArgs(
             device_name="/dev/xvda",
             ebs=aws.ec2.LaunchTemplateBlockDeviceMappingEbsArgs(
-                volume_size=20,
+                volume_size=int(get_env_variable("ROOT_VOLUME_SIZE")),
                 volume_type=get_env_variable("ROOT_VOLUME_TYPE"),
                 delete_on_termination=get_env_variable("DELETE_ON_TERMINATION"),
             ),
@@ -391,7 +390,7 @@ alb = aws.lb.LoadBalancer(
     "csye6225-alb",
     internal=False,
     load_balancer_type="application",
-    security_groups=[ _security_group.id],
+    security_groups=[lb_security_group.id],
     subnets=[subnet.id for subnet in public_subnets],
     enable_deletion_protection=False,
     tags={

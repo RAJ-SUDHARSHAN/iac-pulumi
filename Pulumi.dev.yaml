@@ -1,3 +1,4 @@
 config:
   aws:profile: dev
   aws:region: us-west-1
+  gcp:project: csye6225-dev-406708

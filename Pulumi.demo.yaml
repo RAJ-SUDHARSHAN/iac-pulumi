@@ -1,3 +1,4 @@
 config:
   aws:profile: demo
   aws:region: us-west-1
+  gcp:project: csye6225-demo-406709

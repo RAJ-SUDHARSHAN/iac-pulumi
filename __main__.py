@@ -4,6 +4,7 @@ import os
 
 import pulumi
 import pulumi_aws as aws
+import pulumi_gcp as gcp
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -155,7 +156,7 @@ app_security_group = aws.ec2.SecurityGroup(
         # Allow application traffic from load balancer
         {
             "protocol": "tcp",
-            "from_port": 5000, 
+            "from_port": 5000,
             "to_port": 5000,
             "security_groups": [lb_security_group.id],
         },
@@ -253,8 +254,8 @@ rds_instance = aws.rds.Instance(
 )
 
 
-cloudwatch_role = aws.iam.Role(
-    "cloudwatch_role",
+custom_role = aws.iam.Role(
+    "custom_role",
     assume_role_policy=json.dumps(
         {
             "Version": "2012-10-17",
@@ -270,27 +271,173 @@ cloudwatch_role = aws.iam.Role(
         }
     ),
     tags={
-        "Name": f"{TAG_BASE_NAME}-cloudwatch_role",
+        "Name": f"{TAG_BASE_NAME}-custom_role",
     },
 )
 
 
-cloudwatch_policy_attachment = aws.iam.RolePolicyAttachment(
-    "cloudwatch_role_policy_attachment",
-    role=cloudwatch_role.name,
-    policy_arn="arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy",
-)
-
 cloudwatch_instance_profile = aws.iam.InstanceProfile(
     "cloudwatch_instance_profile",
-    role=cloudwatch_role.name,
+    role=custom_role.name,
     tags={
         "Name": f"{TAG_BASE_NAME}-instance_profile",
     },
 )
 
+cloudwatch_policy_attachment = aws.iam.RolePolicyAttachment(
+    "cloudwatch_role_policy_attachment",
+    role=custom_role.name,
+    policy_arn="arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy",
+)
 
-def generate_user_data_script(rds_endpoint):
+aws.iam.RolePolicyAttachment(
+    "sns_policy_attachment",
+    role=custom_role.name,
+    policy_arn="arn:aws:iam::aws:policy/AmazonSNSFullAccess",
+)
+
+log_policy_document = aws.iam.get_policy_document(
+    statements=[
+        aws.iam.GetPolicyDocumentStatementArgs(
+            actions=[
+                "logs:CreateLogGroup",
+                "logs:CreateLogStream",
+                "logs:PutLogEvents",
+            ],
+            resources=["arn:aws:logs:*:*:*"],
+        )
+    ]
+)
+
+log_policy = aws.iam.Policy("logPolicy", policy=log_policy_document.json)
+
+log_policy_attachment = aws.iam.RolePolicyAttachment(
+    "logPolicyAttachment", role=custom_role.name, policy_arn=log_policy.arn
+)
+
+
+lambda_role = aws.iam.Role(
+    "csye6225-lambda-role",
+    assume_role_policy=json.dumps(
+        {
+            "Version": "2012-10-17",
+            "Statement": [
+                {
+                    "Effect": "Allow",
+                    "Principal": {"Service": "lambda.amazonaws.com"},
+                    "Action": "sts:AssumeRole",
+                }
+            ],
+        }
+    ),
+    tags={"Name": f"{TAG_BASE_NAME}-lambda_role"},
+)
+
+aws.iam.RolePolicyAttachment(
+    "lambda_execution_policy_attachment",
+    role=lambda_role.name,
+    policy_arn="arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole",
+)
+
+
+sns_topic = aws.sns.Topic(
+    "userUpdates",
+    tags={
+        "Name": f"{TAG_BASE_NAME}-userUpdates",
+    },
+)
+
+
+my_bucket = gcp.storage.get_bucket(name=os.getenv("GCP_BUCKET_NAME"))
+gcp_service_account = gcp.serviceaccount.Account(
+    "csye6225_gcp_service_Account",
+    account_id=os.getenv("GCP_SERVICE_ACCOUNT_ID"),
+    display_name=f"{TAG_BASE_NAME}-gcp-service-account",
+)
+
+gcp_key = gcp.serviceaccount.Key(
+    "gcp_key",
+    service_account_id=gcp_service_account.name,
+)
+
+gcp_role_binding = gcp_service_account.email.apply(
+    lambda email: gcp.storage.BucketIAMBinding(
+        "csye6225_gcp_role_binding",
+        bucket=my_bucket.name,
+        role="roles/storage.objectUser",
+        members=[f"serviceAccount:{email}"],
+    )
+)
+
+email_tracking_table = aws.dynamodb.Table(
+    "email_tracking_table",
+    attributes=[
+        aws.dynamodb.TableAttributeArgs(name="id", type="S"),
+    ],
+    hash_key="id",
+    billing_mode="PROVISIONED",
+    read_capacity=5,
+    write_capacity=5,
+    tags={
+        "Name": f"{TAG_BASE_NAME}-email_tracking",
+    },
+)
+
+dynamodb_policy_document = aws.iam.get_policy_document(
+    statements=[
+        aws.iam.GetPolicyDocumentStatementArgs(
+            actions=["dynamodb:PutItem", "dynamodb:UpdateItem"],
+            resources=[email_tracking_table.arn],
+        )
+    ]
+)
+
+
+dynamodb_policy = aws.iam.Policy(
+    "lambda_dynamodb_policy",
+    policy=dynamodb_policy_document.json,
+)
+
+aws.iam.RolePolicyAttachment(
+    "lambda_dynamodb_policy_attachment",
+    role=lambda_role.name,
+    policy_arn=dynamodb_policy.arn,
+)
+
+
+lambda_function = aws.lambda_.Function(
+    "lambda_function",
+    code=pulumi.FileArchive("./lambda_function.zip"),
+    role=lambda_role.arn,
+    handler="app.lambda_handler",
+    runtime="python3.11",
+    environment=aws.lambda_.FunctionEnvironmentArgs(
+        variables={
+            "GCP_BUCKET_NAME": os.getenv("GCP_BUCKET_NAME"),
+            "GCP_SERVICE_ACCOUNT_ID": os.getenv("GCP_SERVICE_ACCOUNT_ID"),
+            "SENDGRID_API_KEY": os.getenv("SENDGRID_API_KEY"),
+            "GCP_KEY": gcp_key.private_key.apply(lambda key: key),
+            "DYNAMODB_TABLE_NAME": email_tracking_table.name.apply(lambda name: name),
+        },
+    ),
+)
+
+aws.lambda_.Permission(
+    "sns_invoke_permission",
+    action="lambda:InvokeFunction",
+    function=lambda_function.name,
+    principal="sns.amazonaws.com",
+    source_arn=sns_topic.arn,
+)
+sns_subscription = aws.sns.TopicSubscription(
+    "lambdaSubscription",
+    topic=sns_topic.arn,
+    protocol="lambda",
+    endpoint=lambda_function.arn,
+)
+
+
+def generate_user_data_script(rds_endpoint, sns_arn):
     return f"""#!/bin/bash
 ENV_FILE="/opt/webapp.properties"
 echo "DB_USERNAME={RDS_USERNAME}" > $ENV_FILE
@@ -300,6 +447,8 @@ echo "FLASK_APP={get_env_variable('FLASK_APP')}" >> $ENV_FILE
 echo "FLASK_DEBUG={get_env_variable('FLASK_DEBUG')}" >> $ENV_FILE
 echo "DATABASE_URL=postgresql://{RDS_USERNAME}:{RDS_DB_PASSWORD}@{rds_endpoint}/{RDS_DB_NAME}" >> $ENV_FILE
 echo "CSV_PATH={get_env_variable('CSV_PATH')}" >> $ENV_FILE
+echo "AWS_REGION={get_env_variable('AWS_REGION')}" >> $ENV_FILE
+echo "SNS_TOPIC_ARN={sns_arn}" >> $ENV_FILE
 chown {USERDATA_USER}:{USERDATA_GROUP} $ENV_FILE
 sudo chown -R {USERDATA_USER}:{USERDATA_GROUP} /opt/webapp/
 sudo chown {USERDATA_USER}:{USERDATA_GROUP} /opt/users.csv
@@ -317,32 +466,17 @@ sudo systemctl start csye6225
 """
 
 
-user_data_script = rds_instance.endpoint.apply(generate_user_data_script)
+combined_output = pulumi.Output.all(rds_instance.endpoint, sns_topic.arn)
+
+# Use apply to generate the user data script with both values
+user_data_script = combined_output.apply(
+    lambda args: generate_user_data_script(args[0], args[1])
+)
+
+# Encode the user data script
 user_data_encoded = user_data_script.apply(
     lambda ud: base64.b64encode(ud.encode()).decode()
 )
-
-
-# app_instance = aws.ec2.Instance(
-#     "app_instance",
-#     ami=get_env_variable("AMI_ID"),
-#     instance_type=get_env_variable("INSTANCE_TYPE"),
-#     key_name=get_env_variable("KEY_NAME"),
-#     vpc_security_group_ids=[app_security_group.id],
-#     subnet_id=public_subnets[0].id,
-#     root_block_device={
-#         "volume_size": int(get_env_variable("ROOT_VOLUME_SIZE")),
-#         "volume_type": get_env_variable("ROOT_VOLUME_TYPE"),
-#         "delete_on_termination": get_env_variable("DELETE_ON_TERMINATION"),
-#     },
-#     tags={
-#         "Name": f"{TAG_BASE_NAME}-app_instance",
-#     },
-#     disable_api_termination=get_env_variable("DISABLE_API_TERMINATION"),
-#     iam_instance_profile=cloudwatch_instance_profile.name,
-#     opts=pulumi.ResourceOptions(depends_on=[rds_instance]),
-#     user_data=user_data_script,
-# )
 
 
 asg_launch_template = aws.ec2.LaunchTemplate(
@@ -408,7 +542,7 @@ target_group = aws.lb.TargetGroup(
         "enabled": True,
         "healthy_threshold": 2,
         "interval": 30,
-        "path": "/healthz", 
+        "path": "/healthz",
         "protocol": "HTTP",
     },
 )
@@ -492,7 +626,6 @@ scale_in_alarm = aws.cloudwatch.MetricAlarm(
     dimensions={"AutoScalingGroupName": asg.name},
     alarm_actions=[scale_in_policy.arn],
 )
-
 
 
 HOSTED_ZONE_NAME = get_env_variable("HOSTED_ZONE_NAME")

@@ -160,7 +160,9 @@ cython_debug/
 #.idea/
 *.pyc
 venv/
+venv_lambda/
 .vscode/
 __pycache__/
 .env
 .DS_Store
+lambda_function.zip

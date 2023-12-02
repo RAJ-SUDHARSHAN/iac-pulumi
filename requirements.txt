@@ -6,6 +6,7 @@ parver==0.5
 protobuf==4.24.4
 pulumi==3.88.1
 pulumi-aws==6.5.0
+pulumi-gcp==7.2.1
 python-dotenv==1.0.0
 PyYAML==6.0.1
 semver==2.13.0

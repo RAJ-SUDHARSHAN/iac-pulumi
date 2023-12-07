@@ -511,11 +511,15 @@ asg_launch_template = aws.ec2.LaunchTemplate(
         aws.ec2.LaunchTemplateTagSpecificationArgs(
             resource_type="instance",
             tags={
-                "Name": f"{TAG_BASE_NAME}-app_instance",
+                "Name": f"{TAG_BASE_NAME}-launch_template-instance",
             },
         )
     ],
-    opts=pulumi.ResourceOptions(depends_on=[rds_instance]),
+    tags={
+        "Name": f"{TAG_BASE_NAME}-launch-template",
+    },
+    update_default_version=True,
+    # opts=pulumi.ResourceOptions(depends_on=[rds_instance]),
     user_data=user_data_encoded,
 )
 
@@ -534,7 +538,6 @@ alb = aws.lb.LoadBalancer(
 
 target_group = aws.lb.TargetGroup(
     "csye6225-target-group",
-    # target_type="alb",
     port=5000,
     protocol="HTTP",
     vpc_id=my_vpc.id,
@@ -547,10 +550,16 @@ target_group = aws.lb.TargetGroup(
     },
 )
 
+cert_arn = aws.acm.get_certificate(domain=os.getenv("CERT_DOMAIN"), statuses=["ISSUED"])
+
+
 front_end_listener = aws.lb.Listener(
     "csye6225_frontEndListener",
     load_balancer_arn=alb.arn,
-    port=80,
+    port=443,
+    protocol="HTTPS",
+    ssl_policy="ELBSecurityPolicy-2016-08",
+    certificate_arn=cert_arn.arn,
     default_actions=[
         aws.lb.ListenerDefaultActionArgs(
             type="forward",
@@ -577,11 +586,15 @@ asg = aws.autoscaling.Group(
     opts=pulumi.ResourceOptions(depends_on=[rds_instance, asg_launch_template]),
     tags=[
         aws.autoscaling.GroupTagArgs(
-            key="Key",
-            value=f"{TAG_BASE_NAME}-app_instance",
+            key="asg-key",
+            value=f"{TAG_BASE_NAME}-asg",
             propagate_at_launch=True,
         )
     ],
+    instance_refresh=aws.autoscaling.GroupInstanceRefreshArgs(
+        strategy="Rolling",
+        # triggers=
+    ),
 )
 
 scale_out_policy = aws.autoscaling.Policy(

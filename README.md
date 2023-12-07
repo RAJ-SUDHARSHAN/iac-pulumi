@@ -30,3 +30,6 @@ PRIVATE_SUBNET_CIDR_BLOCK0=<private-subnet-0-cidr-block>
 PRIVATE_SUBNET_CIDR_BLOCK1=<private-subnet-1-cidr-block>
 PRIVATE_SUBNET_CIDR_BLOCK2=<private-subnet-2-cidr-block>
 ```
+
+## command to import ssl certificate
+aws --profile=demo acm import-certificate --certificate fileb://certificate.pem --certificate-chain fileb://ca_bundle.pem --private-key fileb://private.pem 
